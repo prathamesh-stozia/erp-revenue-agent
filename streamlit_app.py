@@ -22,13 +22,10 @@ import json
 
 # Code from agent.py (excluding if __name__ == "__main__": block)
 load_dotenv()
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SERPER_API_KEY = None
+OPENAI_API_KEY = None
 
-if not SERPER_API_KEY or not OPENAI_API_KEY:
-    raise ValueError("SERPER_API_KEY and OPENAI_API_KEY must be set")
-
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+openai_client = None
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class ERPRevenueInfo(BaseModel):
@@ -49,7 +46,7 @@ class LinkScore(BaseModel):
 class CuratedLinks(BaseModel):
     scored_links: List[LinkScore] = Field(description="List of scored links")
 
-async def web_search(query: str) -> list[dict]:
+async def web_search(query: str, serper_key: str) -> list[dict]:
     """Performs a web search using Serper API and returns a list of results."""
     print(f"\t🔎 Searching for: '{query}'")
     try:
@@ -62,7 +59,7 @@ async def web_search(query: str) -> list[dict]:
         })
         
         headers = {
-            'X-API-KEY': SERPER_API_KEY,
+            'X-API-KEY': serper_key,
             'Content-Type': 'application/json'
         }
         
@@ -116,7 +113,7 @@ async def read_webpage_text(url: str, use_selenium: bool = False) -> str:
     
     return ""
 
-async def curate_links(links: List[dict], company_name: str, search_type: str) -> List[dict]:
+async def curate_links(links: List[dict], company_name: str, search_type: str, openai_key: str) -> List[dict]:
     """Uses LLM to score and curate the best links based on search type (revenue or ERP)."""
     print(f"\t🎯 Curating links for {search_type} research...")
     
@@ -151,8 +148,11 @@ Look specifically for mentions of (if possible): SAP, Oracle, Microsoft Dynamics
 Links to evaluate:\n{links_text}\n
 Focus specifically on ERP systems, business software, and technology implementations."""
 
+    global openai_client
+    openai_client = AsyncOpenAI(api_key=openai_key)
+    
     try:
-        curated = await llm_response_structured_object(prompt, CuratedLinks)
+        curated = await llm_response_structured_object(prompt, CuratedLinks, openai_key)
         scored_links = sorted(curated.scored_links, key=lambda x: x.score, reverse=True)
         
         curated_links = []
@@ -169,8 +169,9 @@ Focus specifically on ERP systems, business software, and technology implementat
         print(f"\t❌ Error during {search_type} curation: {e}")
         return links[:3]
 
-async def llm_response_structured_object(prompt: str, schema: BaseModel) -> BaseModel:
+async def llm_response_structured_object(prompt: str, schema: BaseModel, openai_key: str) -> BaseModel:
     """Gets a structured JSON response from an LLM based on a schema."""
+    openai_client = AsyncOpenAI(api_key=openai_key)
     try:
         response = await openai_client.chat.completions.create(
             model="gpt-4.1-mini",
@@ -185,14 +186,14 @@ async def llm_response_structured_object(prompt: str, schema: BaseModel) -> Base
         print(f"\t❌ Error getting structured LLM response: {e}")
         return schema()
 
-async def extract_erp_revenue_info(content: str, company_name: str) -> ERPRevenueInfo:
+async def extract_erp_revenue_info(content: str, company_name: str, openai_key: str) -> ERPRevenueInfo:
     """Extract ERP and revenue information from scraped content using LLM."""
     prompt = f"""You are a business analyst extracting ERP system and revenue information from web content about '{company_name}'.
 
 Analyze the following content and extract:\n1. ERP SYSTEM: Look for mentions of:\n   - Enterprise Resource Planning (ERP) systems\n   - Business management software\n   - Specific ERP brands: SAP, Oracle, Microsoft Dynamics, Salesforce, NetSuite, Tally, QuickBooks, etc.\n   - Implementation partners or consultants\n   - System integrations\n\n2. REVENUE INFORMATION: Look for:\n   - Annual revenue/turnover figures\n   - Sales figures\n   - Financial performance data\n   - Revenue growth percentages\n   - Market capitalization\n\n3. COMPANY SIZE INDICATORS: Look for:\n   - Company classification (SME, Large Enterprise, etc.)\n   - Business scale indicators\n\nCONTENT TO ANALYZE:\n{content}\n
 Instructions:\n- Be conservative with confidence scores\n- For revenue, include currency and year if available\n- Categorize revenue into ranges\n- If no clear information is found, set fields to null and confidence to 1-3\n- Provide reasoning in notes field"""
     try:
-        result = await llm_response_structured_object(prompt, ERPRevenueInfo)
+        result = await llm_response_structured_object(prompt, ERPRevenueInfo, openai_key)
         return result
     except Exception as e:
         print(f"\t❌ Error extracting ERP/revenue info: {e}")
@@ -211,7 +212,7 @@ def deduplicate_links(links: List[dict]) -> List[dict]:
     
     return deduplicated
 
-async def research_company_erp_revenue(company_name: str, location: str = "", industry: str = "") -> Dict:
+async def research_company_erp_revenue(company_name: str, location: str = "", industry: str = "", serper_key: str = "", openai_key: str = "") -> Dict:
     """Research a single company for ERP and revenue information."""
     print(f"\n🔍 Researching: {company_name}")
     
@@ -230,10 +231,10 @@ async def research_company_erp_revenue(company_name: str, location: str = "", in
     
     for query, search_type in search_queries:
         print(f"\t🔎 Processing {search_type} query: {query}")
-        results = await web_search(query)
+        results = await web_search(query, serper_key)
         
         if results:
-            curated_for_query = await curate_links(results, company_name, search_type)
+            curated_for_query = await curate_links(results, company_name, search_type, openai_key)
             all_curated_links.extend(curated_for_query)
     
     curated_links = deduplicate_links(all_curated_links)
@@ -249,7 +250,7 @@ async def research_company_erp_revenue(company_name: str, location: str = "", in
     combined_content = "\n\n---\n\n".join(all_content)
     
     if combined_content.strip():
-        erp_revenue_info = await extract_erp_revenue_info(combined_content, company_name)
+        erp_revenue_info = await extract_erp_revenue_info(combined_content, company_name, openai_key)
     else:
         erp_revenue_info = ERPRevenueInfo(
             erp_system=None,
@@ -287,9 +288,7 @@ with st.sidebar:
     serper_key = st.text_input("Serper API Key", type="password")
     openai_key = st.text_input("OpenAI API Key", type="password")
     if serper_key and openai_key:
-        os.environ["SERPER_API_KEY"] = serper_key
-        os.environ["OPENAI_API_KEY"] = openai_key
-        st.success("API keys set")
+        st.success("API keys provided")
     else:
         st.warning("Enter both API keys")
 
@@ -324,7 +323,7 @@ if uploaded_file is not None:
 
                 status.text(f"Processing {idx + 1}/{total}: {company}")
                 try:
-                    result = asyncio.run(research_company_erp_revenue(company, location, industry))
+                    result = asyncio.run(research_company_erp_revenue(company, location, industry, serper_key, openai_key))
                     results.append(result)
                 except Exception as e:
                     results.append({
