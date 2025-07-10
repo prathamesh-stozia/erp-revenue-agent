@@ -257,6 +257,7 @@ Analyze the following content and extract:
    - Business management software
    - Specific ERP brands: SAP, Oracle, Microsoft Dynamics, Salesforce, NetSuite, Tally, QuickBooks, etc.
    - Implementation partners or consultants
+   - You can also infer the ERP systems from social posts, job postings, and other sources.(but they will have low confidence)
    - System integrations
 
 2. REVENUE INFORMATION: Look for:
